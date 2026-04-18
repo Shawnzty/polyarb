@@ -1,0 +1,93 @@
+{
+  "config": {
+    "correlated_only": false,
+    "limit_events": 2,
+    "max_results": 25,
+    "min_volume": 0.0,
+    "neg_risk_only": false,
+    "target_sizes": [
+      100.0
+    ]
+  },
+  "generated_at": "2026-04-18T00:00:00+00:00",
+  "opportunities": [
+    {
+      "confidence": 0.95,
+      "event": {
+        "id": "fixture-neg",
+        "slug": "fixture-neg",
+        "title": "Fixture Election Winner"
+      },
+      "execution_by_size": {
+        "100": {
+          "cost": 99.0,
+          "edge": 1.0,
+          "edge_pct": 0.01,
+          "executable": true,
+          "missing_legs": [],
+          "note": "payout-notional basket",
+          "payout": 100.0,
+          "target_size": 100.0
+        }
+      },
+      "explanation": "Headline Yes basket sums to 0.9900, leaving residual 0.0100.",
+      "liquidity": {
+        "event_liquidity": 5000.0,
+        "event_volume": 100000.0,
+        "event_volume24hr": 10000.0,
+        "market_liquidity_sum": 4500.0,
+        "market_volume_sum": 90000.0
+      },
+      "markets": [
+        {
+          "id": "m-a",
+          "liquidity": 1500.0,
+          "no_price": 0.7,
+          "no_token_id": "a-no",
+          "title": "A",
+          "volume": 30000.0,
+          "yes_price": 0.3,
+          "yes_token_id": "a-yes"
+        },
+        {
+          "id": "m-b",
+          "liquidity": 1500.0,
+          "no_price": 0.7,
+          "no_token_id": "b-no",
+          "title": "B",
+          "volume": 30000.0,
+          "yes_price": 0.3,
+          "yes_token_id": "b-yes"
+        },
+        {
+          "id": "m-other",
+          "liquidity": 1500.0,
+          "no_price": 0.61,
+          "no_token_id": "other-no",
+          "title": "Other",
+          "volume": 30000.0,
+          "yes_price": 0.39,
+          "yes_token_id": "other-yes"
+        }
+      ],
+      "rank": 1,
+      "score": 22.0,
+      "theoretical": {
+        "edge": 0.010000000000000009,
+        "kind": "underround",
+        "residual": 0.010000000000000009,
+        "sum_yes": 0.99
+      },
+      "type": "neg-risk-underround",
+      "warnings": [
+        "augmented-neg-risk",
+        "other-outcome"
+      ]
+    }
+  ],
+  "source_counts": {
+    "books": 3,
+    "events": 1,
+    "markets": 3
+  }
+}
