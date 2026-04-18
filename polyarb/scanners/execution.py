@@ -16,8 +16,11 @@ def estimate_basket_cost(
     legs: Iterable[Tuple[GammaMarket, Optional[str], str]],
     books_by_token: Dict[str, OrderBook],
     target_size: float,
+    fee_rates_by_token: Optional[Dict[str, float]] = None,
 ) -> ExecutionEstimate:
-    total_cost = 0.0
+    fee_rates_by_token = fee_rates_by_token or {}
+    total_gross_cost = 0.0
+    total_fee_cost = 0.0
     missing: List[str] = []
     leg_count = 0
 
@@ -30,15 +33,20 @@ def estimate_basket_cost(
         if not book or not book.asks:
             missing.append(f"{market.display_title}: missing {label} book")
             continue
-        fill = book.buy_shares(target_size)
+        fee_rate = market.fee_rate
+        if fee_rate is None:
+            fee_rate = fee_rates_by_token.get(token_id, 0.0)
+        fill = book.buy_shares(target_size, fee_rate=fee_rate)
         if not fill.executable:
             missing.append(
                 f"{market.display_title}: only {fill.filled_shares:.2f}/{target_size:.2f} shares"
             )
             continue
-        total_cost += fill.cost
+        total_gross_cost += fill.gross_cost
+        total_fee_cost += fill.fee_cost
 
     executable = not missing and leg_count > 0
+    total_cost = total_gross_cost + total_fee_cost
     payout = target_size
     edge = payout - total_cost if executable else None
     edge_pct = edge / payout if executable and payout else None
@@ -46,9 +54,13 @@ def estimate_basket_cost(
         target_size=target_size,
         executable=executable,
         cost=total_cost if executable else None,
+        gross_cost=total_gross_cost if executable else None,
+        fee_cost=total_fee_cost if executable else None,
+        net_cost=total_cost if executable else None,
         payout=payout,
         edge=edge,
         edge_pct=edge_pct,
+        leg_count=leg_count,
         missing_legs=missing,
         note="payout-notional basket" if executable else "insufficient depth",
     )

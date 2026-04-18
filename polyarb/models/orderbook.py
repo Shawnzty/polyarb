@@ -19,6 +19,8 @@ class FillEstimate:
     cost: float
     avg_price: Optional[float]
     executable: bool
+    gross_cost: float = 0.0
+    fee_cost: float = 0.0
 
     @property
     def available_shares(self) -> float:
@@ -67,24 +69,29 @@ class OrderBook:
             return None
         return max(0.0, self.best_ask - self.best_bid)
 
-    def buy_shares(self, shares: float) -> FillEstimate:
+    def buy_shares(self, shares: float, fee_rate: float = 0.0) -> FillEstimate:
         remaining = max(0.0, shares)
         filled = 0.0
-        cost = 0.0
+        gross_cost = 0.0
+        fee_cost = 0.0
         for level in self.asks:
             if remaining <= 1e-12:
                 break
             take = min(remaining, level.size)
-            cost += take * level.price
+            gross_cost += take * level.price
+            fee_cost += take * max(0.0, fee_rate) * level.price * (1.0 - level.price)
             filled += take
             remaining -= take
 
         executable = remaining <= 1e-9
-        avg_price = cost / filled if filled > 0 else None
+        cost = gross_cost + fee_cost
+        avg_price = gross_cost / filled if filled > 0 else None
         return FillEstimate(
             requested_shares=shares,
             filled_shares=filled,
             cost=cost,
             avg_price=avg_price,
             executable=executable,
+            gross_cost=gross_cost,
+            fee_cost=fee_cost,
         )

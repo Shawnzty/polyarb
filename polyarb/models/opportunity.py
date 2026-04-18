@@ -14,6 +14,10 @@ class OpportunityMarket:
     no_price: Optional[float]
     volume: float
     liquidity: float
+    end_date: str = ""
+    resolution_source: str = ""
+    fees_enabled: bool = False
+    fee_rate: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -25,6 +29,10 @@ class OpportunityMarket:
             "no_price": self.no_price,
             "volume": self.volume,
             "liquidity": self.liquidity,
+            "end_date": self.end_date,
+            "resolution_source": self.resolution_source,
+            "fees_enabled": self.fees_enabled,
+            "fee_rate": self.fee_rate,
         }
 
 
@@ -36,6 +44,10 @@ class ExecutionEstimate:
     payout: float
     edge: Optional[float]
     edge_pct: Optional[float]
+    gross_cost: Optional[float] = None
+    fee_cost: Optional[float] = None
+    net_cost: Optional[float] = None
+    leg_count: int = 0
     missing_legs: List[str] = field(default_factory=list)
     note: str = ""
 
@@ -44,9 +56,13 @@ class ExecutionEstimate:
             "target_size": self.target_size,
             "executable": self.executable,
             "cost": self.cost,
+            "gross_cost": self.gross_cost,
+            "fee_cost": self.fee_cost,
+            "net_cost": self.net_cost,
             "payout": self.payout,
             "edge": self.edge,
             "edge_pct": self.edge_pct,
+            "leg_count": self.leg_count,
             "missing_legs": self.missing_legs,
             "note": self.note,
         }

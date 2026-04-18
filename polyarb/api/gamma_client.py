@@ -64,3 +64,20 @@ def collect_market_token_ids(events: Iterable[GammaEvent], include_no: bool = Tr
                     token_ids.append(token_id)
                     seen.add(token_id)
     return token_ids
+
+
+def collect_fee_token_ids(events: Iterable[GammaEvent], include_no: bool = True) -> List[str]:
+    token_ids = []
+    seen = set()
+    for event in events:
+        for market in event.markets:
+            if not market.fees_enabled or market.fee_rate is not None:
+                continue
+            candidates = [market.yes_token_id]
+            if include_no:
+                candidates.append(market.no_token_id)
+            for token_id in candidates:
+                if token_id and token_id not in seen:
+                    token_ids.append(token_id)
+                    seen.add(token_id)
+    return token_ids

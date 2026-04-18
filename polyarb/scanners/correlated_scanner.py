@@ -41,8 +41,13 @@ class Implication:
 
 
 class CorrelatedScanner:
-    def __init__(self, target_sizes: Iterable[float]) -> None:
+    def __init__(
+        self,
+        target_sizes: Iterable[float],
+        fee_rates_by_token: Dict[str, float] = None,
+    ) -> None:
         self.target_sizes = list(target_sizes)
+        self.fee_rates_by_token = fee_rates_by_token or {}
 
     def scan(
         self,
@@ -54,7 +59,6 @@ class CorrelatedScanner:
         for event in event_list:
             implications.extend(self._time_implications(event))
             implications.extend(self._threshold_implications(event))
-        implications.extend(self._presidential_path_implications(event_list))
         return [
             self._to_opportunity(implication, books_by_token)
             for implication in implications
@@ -74,8 +78,10 @@ class CorrelatedScanner:
         dated.sort(key=lambda item: item[0])
         implications: List[Implication] = []
         for index in range(1, len(dated)):
-            earlier = dated[index - 1][1]
-            later = dated[index][1]
+            earlier_date, earlier = dated[index - 1]
+            later_date, later = dated[index]
+            if later_date <= earlier_date or not self._rules_match(event, earlier, later, allow_distinct_dates=True):
+                continue
             implications.append(
                 Implication(
                     type="correlated-time",
@@ -93,6 +99,8 @@ class CorrelatedScanner:
     def _threshold_implications(self, event: GammaEvent) -> List[Implication]:
         grouped: Dict[str, List[Tuple[float, GammaMarket]]] = {"up": [], "down": []}
         for market in event.markets:
+            if self._is_range_bucket(market):
+                continue
             direction = self._threshold_direction(market)
             threshold = self._parse_threshold(market.group_item_title) or self._parse_threshold(market.question)
             if direction and threshold is not None and market.yes_price is not None:
@@ -110,6 +118,8 @@ class CorrelatedScanner:
             for index in range(1, len(easier_to_harder)):
                 easier = easier_to_harder[index - 1][1]
                 harder = easier_to_harder[index][1]
+                if not self._rules_match(event, easier, harder, allow_distinct_dates=False):
+                    continue
                 implications.append(
                     Implication(
                         type="correlated-threshold",
@@ -119,66 +129,6 @@ class CorrelatedScanner:
                         confidence=0.90,
                         explanation=(
                             f"Easier threshold '{easier.display_title}' should be at least as likely as harder threshold '{harder.display_title}'."
-                        ),
-                    )
-                )
-        return implications
-
-    def _presidential_path_implications(self, events: List[GammaEvent]) -> List[Implication]:
-        nominee_events: Dict[Tuple[str, str], GammaEvent] = {}
-        winner_events: Dict[str, GammaEvent] = {}
-        nominee_re = re.compile(r"\b(democratic|republican)\s+presidential\s+nominee\s+(\d{4})\b", re.I)
-        winner_re = re.compile(r"\bpresidential\s+election\s+winner\s+(\d{4})\b", re.I)
-
-        for event in events:
-            nominee_match = nominee_re.search(event.title)
-            if nominee_match:
-                nominee_events[(nominee_match.group(1).lower(), nominee_match.group(2))] = event
-            winner_match = winner_re.search(event.title)
-            if winner_match:
-                winner_events[winner_match.group(1)] = event
-
-        implications: List[Implication] = []
-        for (_party, year), nominee_event in nominee_events.items():
-            winner_event = winner_events.get(year)
-            if not winner_event:
-                continue
-            nominee_by_name = {
-                self._normalize_name(market.display_title): market
-                for market in nominee_event.markets
-                if market.yes_price is not None and self._normalize_name(market.display_title) != "other"
-            }
-            for winner_market in winner_event.markets:
-                name = self._normalize_name(winner_market.display_title)
-                nominee_market = nominee_by_name.get(name)
-                if not nominee_market or winner_market.yes_price is None:
-                    continue
-                synthetic_event = GammaEvent(
-                    id=f"{nominee_event.id}:{winner_event.id}",
-                    title=f"{nominee_event.title} / {winner_event.title}",
-                    slug=f"{nominee_event.slug}:{winner_event.slug}",
-                    description="",
-                    active=True,
-                    closed=False,
-                    neg_risk=False,
-                    neg_risk_augmented=False,
-                    enable_neg_risk=False,
-                    show_all_outcomes=False,
-                    volume=max(nominee_event.volume, winner_event.volume),
-                    volume24hr=max(nominee_event.volume24hr, winner_event.volume24hr),
-                    liquidity=max(nominee_event.liquidity, winner_event.liquidity),
-                    end_date="",
-                    markets=[nominee_market, winner_market],
-                )
-                implications.append(
-                    Implication(
-                        type="correlated-path",
-                        event=synthetic_event,
-                        easier=nominee_market,
-                        harder=winner_market,
-                        confidence=0.86,
-                        explanation=(
-                            f"{winner_market.display_title} winning the presidency should imply first winning the matching party nomination."
                         ),
                     )
                 )
@@ -194,7 +144,16 @@ class CorrelatedScanner:
         hard_no = implication.harder.no_price
         if hard_no is None:
             hard_no = max(0.0, 1.0 - hard_yes)
-        package_cost = easy_yes + hard_no
+        one_share_package = estimate_basket_cost(
+            [
+                (implication.easier, implication.easier.yes_token_id, "Yes"),
+                (implication.harder, implication.harder.no_token_id, "No"),
+            ],
+            books_by_token,
+            1.0,
+            self.fee_rates_by_token,
+        )
+        package_cost = one_share_package.net_cost if one_share_package.executable and one_share_package.net_cost is not None else easy_yes + hard_no
         edge = 1.0 - package_cost
         violation = hard_yes - easy_yes
         warnings = self._warnings(implication, books_by_token)
@@ -206,6 +165,7 @@ class CorrelatedScanner:
                 ],
                 books_by_token,
                 size,
+                self.fee_rates_by_token,
             )
             for size in self.target_sizes
         }
@@ -231,6 +191,8 @@ class CorrelatedScanner:
                 "package_cost": package_cost,
                 "edge": edge,
                 "kind": "implication-package",
+                "price_source": "clob_best_ask_post_fee" if one_share_package.executable else "gamma_price_fallback",
+                "fee_cost_for_one_share_package": one_share_package.fee_cost,
             },
             execution_by_size=execution,
             liquidity={
@@ -280,6 +242,10 @@ class CorrelatedScanner:
             no_price=market.no_price,
             volume=market.volume,
             liquidity=market.liquidity,
+            end_date=market.end_date,
+            resolution_source=market.resolution_source,
+            fees_enabled=market.fees_enabled,
+            fee_rate=market.fee_rate,
         )
 
     def _violation(self, easier: GammaMarket, harder: GammaMarket) -> float:
@@ -289,11 +255,36 @@ class CorrelatedScanner:
 
     def _threshold_direction(self, market: GammaMarket) -> Optional[str]:
         text = f"{market.group_item_title} {market.question}".lower()
-        if "↑" in text or "above" in text or "reach" in text or " hit (high)" in text or " high" in text:
+        if "↑" in text or "above" in text or "reach" in text or "at least" in text or "hit (high)" in text:
             return "up"
-        if "↓" in text or "below" in text or "dip" in text or " hit (low)" in text or " low" in text:
+        if "↓" in text or "below" in text or "dip" in text or "hit (low)" in text:
             return "down"
         return None
+
+    def _is_range_bucket(self, market: GammaMarket) -> bool:
+        text = f"{market.group_item_title} {market.question}".lower()
+        if any(term in text for term in ["between", "range", "o/u", "over/under", "total corners"]):
+            return True
+        return bool(re.search(r"\b\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?\b", text))
+
+    def _rules_match(
+        self,
+        event: GammaEvent,
+        easier: GammaMarket,
+        harder: GammaMarket,
+        allow_distinct_dates: bool,
+    ) -> bool:
+        if (easier.fee_rate or 0.0) != (harder.fee_rate or 0.0) or easier.fees_enabled != harder.fees_enabled:
+            return False
+        if not allow_distinct_dates and self._normalize_text(easier.end_date) != self._normalize_text(harder.end_date):
+            return False
+        easier_source = self._normalize_text(easier.resolution_source or event.resolution_source)
+        harder_source = self._normalize_text(harder.resolution_source or event.resolution_source)
+        if easier_source or harder_source:
+            return easier_source == harder_source
+        easier_description = self._normalize_text(easier.description or event.description)
+        harder_description = self._normalize_text(harder.description or event.description)
+        return bool(easier_description and harder_description and easier_description == harder_description)
 
     def _parse_threshold(self, text: str) -> Optional[float]:
         normalized = text.replace(",", "")
@@ -344,3 +335,6 @@ class CorrelatedScanner:
 
     def _normalize_name(self, value: str) -> str:
         return re.sub(r"\s+", " ", value.strip().lower())
+
+    def _normalize_text(self, value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip().lower())

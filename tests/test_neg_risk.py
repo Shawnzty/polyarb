@@ -1,6 +1,7 @@
 from polyarb.models.event import GammaEvent
+from polyarb.models.orderbook import OrderBook
 from polyarb.scanners.neg_risk_scanner import NegRiskScanner
-from tests.conftest import event_payload, market_payload
+from tests.conftest import book_payload, event_payload, market_payload
 
 
 def test_neg_risk_underround_and_execution(neg_risk_event, simple_books):
@@ -19,7 +20,7 @@ def test_neg_risk_underround_and_execution(neg_risk_event, simple_books):
     assert "augmented-neg-risk" in opportunity.warnings
 
 
-def test_neg_risk_overround_detection(simple_books):
+def test_neg_risk_overround_detection():
     event = GammaEvent.from_gamma(
         event_payload(
             "fixture-over",
@@ -31,8 +32,13 @@ def test_neg_risk_overround_detection(simple_books):
             ],
         )
     )
+    books = {
+        "a-yes": OrderBook.from_clob(book_payload("a-yes", asks=[{"price": "0.41", "size": "1000"}], bids=[{"price": "0.40", "size": "1000"}])),
+        "b-yes": OrderBook.from_clob(book_payload("b-yes", asks=[{"price": "0.41", "size": "1000"}], bids=[{"price": "0.40", "size": "1000"}])),
+        "other-yes": OrderBook.from_clob(book_payload("other-yes", asks=[{"price": "0.31", "size": "1000"}], bids=[{"price": "0.30", "size": "1000"}])),
+    }
 
-    opportunities = NegRiskScanner([100.0]).scan([event], simple_books)
+    opportunities = NegRiskScanner([100.0]).scan([event], books)
 
     assert len(opportunities) == 1
     assert opportunities[0].type == "neg-risk-overround"
@@ -40,7 +46,7 @@ def test_neg_risk_overround_detection(simple_books):
     assert round(opportunities[0].theoretical["residual"], 4) == -0.1
 
 
-def test_neg_risk_missing_other_leg_is_warned_and_not_executable(simple_books):
+def test_neg_risk_missing_gamma_price_is_warned_but_clob_can_classify(simple_books):
     event = GammaEvent.from_gamma(
         event_payload(
             "fixture-missing-other",
@@ -52,11 +58,10 @@ def test_neg_risk_missing_other_leg_is_warned_and_not_executable(simple_books):
                     "m-other",
                     "Other",
                     0.0,
-                    "unused",
+                    "other-yes",
                     extra={
                         "question": "Will Any Other Candidate win?",
                         "outcomePrices": None,
-                        "clobTokenIds": None,
                         "negRiskOther": True,
                     },
                 ),
@@ -67,10 +72,9 @@ def test_neg_risk_missing_other_leg_is_warned_and_not_executable(simple_books):
     opportunities = NegRiskScanner([100.0]).scan([event], simple_books)
 
     assert len(opportunities) == 1
-    assert opportunities[0].execution_by_size["100"].executable is False
+    assert opportunities[0].execution_by_size["100"].executable is True
     assert "other-outcome" in opportunities[0].warnings
     assert "missing-price" in opportunities[0].warnings
-    assert "missing-token" in opportunities[0].warnings
 
 
 def test_neg_risk_inactive_other_still_warns(simple_books):
@@ -100,3 +104,27 @@ def test_neg_risk_inactive_other_still_warns(simple_books):
     assert opportunities[0].execution_by_size["100"].executable is True
     assert "other-outcome" in opportunities[0].warnings
     assert "missing-price" not in opportunities[0].warnings
+
+
+def test_neg_risk_theoretical_uses_clob_asks_not_gamma_prices():
+    event = GammaEvent.from_gamma(
+        event_payload(
+            "clob-theory",
+            "CLOB Theory",
+            [
+                market_payload("m-a", "A", 0.90, "a-yes", "a-no"),
+                market_payload("m-b", "B", 0.90, "b-yes", "b-no"),
+            ],
+        )
+    )
+    books = {
+        "a-yes": OrderBook.from_clob(book_payload("a-yes", asks=[{"price": "0.40", "size": "1000"}], bids=[{"price": "0.39", "size": "1000"}])),
+        "b-yes": OrderBook.from_clob(book_payload("b-yes", asks=[{"price": "0.40", "size": "1000"}], bids=[{"price": "0.39", "size": "1000"}])),
+    }
+
+    opportunities = NegRiskScanner([100.0]).scan([event], books)
+
+    assert len(opportunities) == 1
+    assert opportunities[0].type == "neg-risk-underround"
+    assert opportunities[0].theoretical["price_source"] == "clob_best_ask_post_fee"
+    assert round(opportunities[0].theoretical["sum_yes"], 4) == 0.8

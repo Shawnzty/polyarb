@@ -1,0 +1,7 @@
+scan:
+  within_hours: 24
+  target_sizes: [100, 500, 1000]
+risk:
+  leg_risk_bps_per_extra_leg: 25
+  other_outcome_penalty_bps: 100
+  augmented_neg_risk_penalty_bps: 50

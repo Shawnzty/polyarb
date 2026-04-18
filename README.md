@@ -4,7 +4,7 @@ Polyarb is a research-only Polymarket scanner for structural anomalies:
 
 - neg-risk / multi-outcome basket underrounds and overrounds
 - narrow correlated-market monotonicity violations
-- executable-cost estimates from public CLOB order books
+- post-fee executable-cost estimates from public CLOB order books
 
 It is not a trading bot. It has no wallet integration, no authentication, no order placement, no database, and no execution logic.
 
@@ -25,12 +25,32 @@ polyarb scan
 polyarb scan --json
 polyarb scan --min-volume 100000
 polyarb scan --target-sizes 100,500,1000
+polyarb scan --within-hours 6
+polyarb scan --all-horizons
 polyarb scan --limit-events 200
 polyarb scan --neg-risk-only
 polyarb scan --correlated-only
 ```
 
-Target sizes are payout notionals. For a `$100` neg-risk basket, the scanner estimates buying 100 shares of every named Yes outcome, so an exhaustive basket would pay `$100`.
+By default, `polyarb scan` only scans markets ending within the next 24 hours. You can change that default in `config.yaml`, override it with `--within-hours`, or disable horizon filtering with `--all-horizons`.
+
+Target sizes are payout notionals. For a `$100` neg-risk basket, the scanner estimates buying 100 shares of every named Yes outcome, so an exhaustive basket would pay `$100`. Costs and edge are reported after taker fees when Gamma exposes a fee schedule, with CLOB fee-rate fallback for fee-enabled markets missing schedule data.
+
+## Config
+
+`config.yaml` controls the default scan horizon and risk penalties:
+
+```yaml
+scan:
+  within_hours: 24
+  target_sizes: [100, 500, 1000]
+risk:
+  leg_risk_bps_per_extra_leg: 25
+  other_outcome_penalty_bps: 100
+  augmented_neg_risk_penalty_bps: 50
+```
+
+CLI flags override config values for the current run.
 
 ## What The Scanner Reports
 
@@ -39,7 +59,7 @@ For each candidate, human output includes:
 - rank and opportunity type
 - event title
 - theoretical headline edge
-- executable estimate by target size
+- post-fee executable estimate by target size
 - volume and liquidity summary
 - confidence score
 - warning flags
@@ -65,6 +85,8 @@ Important implementation details:
 - Gamma fields such as `outcomes`, `outcomePrices`, and `clobTokenIds` are often JSON-encoded strings.
 - Gamma `negRisk=true` filtering is not assumed reliable; Polyarb filters `event.negRisk` client-side.
 - CLOB book levels are sorted before fill math because live payload ordering should not be trusted for execution estimates.
+- Neg-risk underround math uses CLOB best asks plus taker fees, not Gamma headline prices.
+- Correlated scanner links are intentionally strict: same event, compatible rules, matching resolution source or matching descriptions, and no range-bucket/categorical shortcuts.
 
 ## Tests
 
@@ -81,6 +103,9 @@ The test suite is offline and deterministic. It covers:
 - correlated time monotonicity
 - correlated threshold monotonicity
 - ranking penalties
+- 24h horizon filtering and config overrides
+- post-fee execution math
+- correlated false-positive suppression
 - CLI text and JSON smoke paths
 
 ## Limitations
@@ -90,5 +115,6 @@ The test suite is offline and deterministic. It covers:
 - “Other” outcomes are penalized and annotated, not treated as safe.
 - Augmented neg-risk events are penalized and annotated.
 - Correlated scanning is intentionally conservative and misses many possible links.
-- Fees are warned and penalized but not folded into executable edge math in v1.
+- Fees are included when fee schedule data is available, but real order placement may still differ from REST estimates.
 - Live API failures or missing books degrade results instead of stopping the scan.
+- REST polling is not an atomic execution system; multi-leg fills can stale or get legged.

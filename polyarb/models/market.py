@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from polyarb.models.parsing import as_bool, as_float, as_optional_float, clean_text, parse_json_list
+from polyarb.models.parsing import (
+    as_bool,
+    as_float,
+    as_optional_float,
+    clean_text,
+    parse_json_dict,
+    parse_json_list,
+)
 
 
 @dataclass(frozen=True)
@@ -11,6 +18,9 @@ class GammaMarket:
     id: str
     question: str
     slug: str
+    description: str
+    end_date: str
+    resolution_source: str
     group_item_title: str
     outcomes: List[str]
     outcome_prices: List[float]
@@ -22,6 +32,10 @@ class GammaMarket:
     neg_risk: bool
     neg_risk_other: bool
     fees_enabled: bool
+    fee_schedule: Dict[str, Any]
+    maker_base_fee: Optional[float]
+    taker_base_fee: Optional[float]
+    fee_type: str
     volume: float
     volume24hr: float
     liquidity: float
@@ -40,6 +54,9 @@ class GammaMarket:
             id=clean_text(payload.get("id")),
             question=clean_text(payload.get("question")),
             slug=clean_text(payload.get("slug")),
+            description=clean_text(payload.get("description")),
+            end_date=clean_text(payload.get("endDate")),
+            resolution_source=clean_text(payload.get("resolutionSource")),
             group_item_title=clean_text(payload.get("groupItemTitle")),
             outcomes=outcomes,
             outcome_prices=outcome_prices,
@@ -51,6 +68,10 @@ class GammaMarket:
             neg_risk=as_bool(payload.get("negRisk")),
             neg_risk_other=as_bool(payload.get("negRiskOther")),
             fees_enabled=as_bool(payload.get("feesEnabled")),
+            fee_schedule=parse_json_dict(payload.get("feeSchedule")),
+            maker_base_fee=as_optional_float(payload.get("makerBaseFee")),
+            taker_base_fee=as_optional_float(payload.get("takerBaseFee")),
+            fee_type=clean_text(payload.get("feeType")),
             volume=as_float(payload.get("volumeNum"), as_float(payload.get("volume"))),
             volume24hr=as_float(payload.get("volume24hrClob"), as_float(payload.get("volume24hr"))),
             liquidity=as_float(payload.get("liquidityNum"), as_float(payload.get("liquidity"))),
@@ -91,6 +112,16 @@ class GammaMarket:
         if index is None:
             index = 1
         return self.outcome_prices[index] if index < len(self.outcome_prices) else None
+
+    @property
+    def fee_rate(self) -> Optional[float]:
+        rate = self.fee_schedule.get("rate")
+        if rate is None:
+            return None
+        try:
+            return float(rate)
+        except (TypeError, ValueError):
+            return None
 
     def _outcome_index(self, label: str) -> Optional[int]:
         for index, outcome in enumerate(self.outcomes):

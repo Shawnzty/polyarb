@@ -46,3 +46,19 @@ class ClobClient:
             if isinstance(payload, dict):
                 books.append(payload)
         return books
+
+    def get_fee_rates(self, token_ids: Iterable[str]) -> Dict[str, float]:
+        rates: Dict[str, float] = {}
+        for token_id in dict.fromkeys(str(token_id) for token_id in token_ids if token_id):
+            try:
+                payload = self.http.get("/fee-rate", params={"token_id": token_id})
+            except ApiError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            base_fee = payload.get("base_fee")
+            try:
+                rates[token_id] = max(0.0, float(base_fee) / 1000.0)
+            except (TypeError, ValueError):
+                continue
+        return rates

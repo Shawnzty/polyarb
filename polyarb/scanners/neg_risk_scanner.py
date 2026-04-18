@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 from polyarb.models.event import GammaEvent
 from polyarb.models.market import GammaMarket
@@ -14,8 +14,13 @@ OVERROUND_THRESHOLD = -0.005
 
 
 class NegRiskScanner:
-    def __init__(self, target_sizes: Iterable[float]) -> None:
+    def __init__(
+        self,
+        target_sizes: Iterable[float],
+        fee_rates_by_token: Dict[str, float] = None,
+    ) -> None:
         self.target_sizes = list(target_sizes)
+        self.fee_rates_by_token = fee_rates_by_token or {}
 
     def scan(
         self,
@@ -27,25 +32,36 @@ class NegRiskScanner:
             if not event.active or event.closed or not event.neg_risk:
                 continue
             markets = self._active_markets(event)
-            priced_markets = [market for market in markets if market.yes_price is not None]
-            prices = [market.yes_price for market in priced_markets if market.yes_price is not None]
-            if len(prices) < 2:
+            if len(markets) < 2:
                 continue
 
-            sum_yes = sum(prices)
-            residual = 1.0 - sum_yes
-            if residual >= UNDERROUND_THRESHOLD:
+            one_share_ask = estimate_basket_cost(
+                [(market, market.yes_token_id, "Yes") for market in markets],
+                books_by_token,
+                1.0,
+                self.fee_rates_by_token,
+            )
+            sum_best_bid = self._sum_best_bids(markets, books_by_token)
+            residual = None
+
+            if one_share_ask.executable and one_share_ask.net_cost is not None and 1.0 - one_share_ask.net_cost >= UNDERROUND_THRESHOLD:
+                sum_yes = one_share_ask.net_cost
+                residual = 1.0 - sum_yes
                 opp_type = "neg-risk-underround"
                 explanation = (
-                    f"Headline Yes basket sums to {sum_yes:.4f}, leaving residual {residual:.4f}."
+                    f"Post-fee best-ask Yes basket costs {sum_yes:.4f}, leaving residual {residual:.4f}."
                 )
                 confidence = 0.95
-            elif residual <= OVERROUND_THRESHOLD:
+                price_source = "clob_best_ask_post_fee"
+            elif sum_best_bid is not None and 1.0 - sum_best_bid <= OVERROUND_THRESHOLD:
+                sum_yes = sum_best_bid
+                residual = 1.0 - sum_yes
                 opp_type = "neg-risk-overround"
                 explanation = (
-                    f"Headline Yes basket sums to {sum_yes:.4f}; this is a distortion/relative-value flag, not a clean buy-basket arb."
+                    f"Best-bid Yes basket sums to {sum_yes:.4f}; this is a distortion/relative-value flag, not a clean buy-basket arb."
                 )
                 confidence = 0.80
+                price_source = "clob_best_bid"
             else:
                 continue
 
@@ -55,6 +71,7 @@ class NegRiskScanner:
                     [(market, market.yes_token_id, "Yes") for market in markets],
                     books_by_token,
                     size,
+                    self.fee_rates_by_token,
                 )
                 for size in self.target_sizes
             }
@@ -72,6 +89,8 @@ class NegRiskScanner:
                         "residual": residual,
                         "edge": residual,
                         "kind": "underround" if residual > 0 else "overround",
+                        "price_source": price_source,
+                        "fee_cost_for_one_share_basket": one_share_ask.fee_cost,
                     },
                     execution_by_size=execution,
                     liquidity={
@@ -88,6 +107,22 @@ class NegRiskScanner:
             )
 
         return opportunities
+
+    def _sum_best_bids(
+        self,
+        markets: List[GammaMarket],
+        books_by_token: Dict[str, OrderBook],
+    ) -> Optional[float]:
+        total = 0.0
+        for market in markets:
+            token_id = market.yes_token_id
+            if not token_id:
+                return None
+            book = books_by_token.get(token_id)
+            if not book or book.best_bid is None:
+                return None
+            total += book.best_bid
+        return total
 
     def _active_markets(self, event: GammaEvent) -> List[GammaMarket]:
         markets = []
@@ -145,4 +180,8 @@ class NegRiskScanner:
             no_price=market.no_price,
             volume=market.volume,
             liquidity=market.liquidity,
+            end_date=market.end_date,
+            resolution_source=market.resolution_source,
+            fees_enabled=market.fees_enabled,
+            fee_rate=market.fee_rate,
         )

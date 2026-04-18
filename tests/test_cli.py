@@ -9,7 +9,7 @@ def test_cli_json_smoke(neg_risk_event, simple_books):
     stdout = io.StringIO()
 
     code = main(
-        ["scan", "--json", "--limit-events", "1", "--target-sizes", "100"],
+        ["scan", "--json", "--limit-events", "1", "--target-sizes", "100", "--all-horizons"],
         gamma_client=FakeGammaClient([neg_risk_event]),
         clob_client=FakeClobClient(simple_books),
         stdout=stdout,
@@ -25,7 +25,7 @@ def test_cli_human_smoke(neg_risk_event, simple_books):
     stdout = io.StringIO()
 
     code = main(
-        ["scan", "--limit-events", "1", "--target-sizes", "100"],
+        ["scan", "--limit-events", "1", "--target-sizes", "100", "--all-horizons"],
         gamma_client=FakeGammaClient([neg_risk_event]),
         clob_client=FakeClobClient(simple_books),
         stdout=stdout,

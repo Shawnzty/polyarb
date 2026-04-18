@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def parse_json_list(value: Any) -> List[Any]:
@@ -21,6 +21,23 @@ def parse_json_list(value: Any) -> List[Any]:
             return []
         return parsed if isinstance(parsed, list) else []
     return []
+
+
+def parse_json_dict(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def as_bool(value: Any, default: bool = False) -> bool:

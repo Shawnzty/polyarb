@@ -13,6 +13,7 @@ class GammaEvent:
     title: str
     slug: str
     description: str
+    resolution_source: str
     active: bool
     closed: bool
     neg_risk: bool
@@ -39,6 +40,7 @@ class GammaEvent:
             title=clean_text(payload.get("title")),
             slug=clean_text(payload.get("slug")),
             description=clean_text(payload.get("description")),
+            resolution_source=clean_text(payload.get("resolutionSource")),
             active=as_bool(payload.get("active")),
             closed=as_bool(payload.get("closed")),
             neg_risk=as_bool(payload.get("negRisk")),

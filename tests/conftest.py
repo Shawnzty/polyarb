@@ -24,6 +24,9 @@ def market_payload(
         "id": market_id,
         "question": f"Will {title} win?",
         "slug": market_id,
+        "description": "Fixture market rules",
+        "endDate": "2026-12-31T00:00:00Z",
+        "resolutionSource": "fixture-source",
         "groupItemTitle": title,
         "outcomes": "[\"Yes\", \"No\"]",
         "outcomePrices": f"[\"{yes_price}\", \"{1 - yes_price}\"]",
@@ -57,6 +60,7 @@ def event_payload(
         "title": title,
         "slug": event_id,
         "description": "Fixture event",
+        "resolutionSource": "fixture-source",
         "active": True,
         "closed": False,
         "negRisk": neg_risk,
@@ -153,3 +157,6 @@ class FakeClobClient:
 
     def get_books(self, token_ids):
         return {token_id: self.books[token_id] for token_id in token_ids if token_id in self.books}
+
+    def get_fee_rates(self, token_ids):
+        return {}

@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, TextIO
 
 from polyarb.api.clob_client import ClobClient
-from polyarb.api.gamma_client import GammaClient, collect_market_token_ids
+from polyarb.api.gamma_client import GammaClient, collect_fee_token_ids, collect_market_token_ids
+from polyarb.config import load_config
 from polyarb.models.event import GammaEvent
 from polyarb.models.opportunity import Opportunity
 from polyarb.ranking.scoring import score_opportunities
 from polyarb.scanners.correlated_scanner import CorrelatedScanner
 from polyarb.scanners.neg_risk_scanner import NegRiskScanner
+from polyarb.timeutils import filter_events_by_horizon
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,8 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan = subparsers.add_parser("scan", help="scan public Polymarket data")
     scan.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    scan.add_argument("--config", help="path to config.yaml")
     scan.add_argument("--min-volume", type=float, default=0.0, help="minimum event lifetime volume")
-    scan.add_argument("--target-sizes", default="100,500,1000", help="comma-separated payout notionals")
+    scan.add_argument("--target-sizes", help="comma-separated payout notionals")
+    scan.add_argument("--within-hours", type=float, help="only scan markets ending within this many hours")
+    scan.add_argument("--all-horizons", action="store_true", help="disable configured horizon filtering")
     scan.add_argument("--limit-events", type=int, default=200, help="maximum active events to inspect")
     scan.add_argument("--max-results", type=int, default=25, help="maximum opportunities to print")
     scan.add_argument("--neg-risk-only", action="store_true", help="only run neg-risk scanner")
@@ -59,22 +64,38 @@ def run_scan(
     gamma_client: Optional[GammaClient] = None,
     clob_client: Optional[ClobClient] = None,
 ) -> Dict[str, Any]:
-    target_sizes = parse_target_sizes(args.target_sizes)
+    config = load_config(args.config)
+    target_sizes = (
+        parse_target_sizes(args.target_sizes)
+        if args.target_sizes
+        else [float(size) for size in config["scan"]["target_sizes"]]
+    )
+    within_hours = None
+    if not args.all_horizons:
+        within_hours = args.within_hours if args.within_hours is not None else float(config["scan"]["within_hours"])
+
     gamma = gamma_client or GammaClient()
     clob = clob_client or ClobClient()
 
     events = gamma.get_events(limit_events=args.limit_events, min_volume=args.min_volume)
+    scanned_events = filter_events_by_horizon(events, within_hours)
     include_no = not args.neg_risk_only
-    token_ids = collect_market_token_ids(events, include_no=include_no)
+    token_ids = collect_market_token_ids(scanned_events, include_no=include_no)
     books_by_token = clob.get_books(token_ids)
+    fee_token_ids = collect_fee_token_ids(scanned_events, include_no=include_no)
+    fee_rates_by_token = (
+        clob.get_fee_rates(fee_token_ids)
+        if fee_token_ids and hasattr(clob, "get_fee_rates")
+        else {}
+    )
 
     opportunities: List[Opportunity] = []
     if not args.correlated_only:
-        opportunities.extend(NegRiskScanner(target_sizes).scan(events, books_by_token))
+        opportunities.extend(NegRiskScanner(target_sizes, fee_rates_by_token).scan(scanned_events, books_by_token))
     if not args.neg_risk_only:
-        opportunities.extend(CorrelatedScanner(target_sizes).scan(events, books_by_token))
+        opportunities.extend(CorrelatedScanner(target_sizes, fee_rates_by_token).scan(scanned_events, books_by_token))
 
-    scored = score_opportunities(opportunities)[: args.max_results]
+    scored = score_opportunities(opportunities, config.get("risk", {}))[: args.max_results]
     for rank, opportunity in enumerate(scored, start=1):
         opportunity.rank = rank
 
@@ -83,15 +104,20 @@ def run_scan(
         "config": {
             "min_volume": args.min_volume,
             "target_sizes": target_sizes,
+            "within_hours": within_hours,
+            "all_horizons": args.all_horizons,
+            "config_path": args.config or "config.yaml",
             "limit_events": args.limit_events,
             "max_results": args.max_results,
             "neg_risk_only": args.neg_risk_only,
             "correlated_only": args.correlated_only,
         },
         "source_counts": {
-            "events": len(events),
-            "markets": sum(len(event.markets) for event in events),
+            "events_fetched": len(events),
+            "events": len(scanned_events),
+            "markets": sum(len(event.markets) for event in scanned_events),
             "books": len(books_by_token),
+            "fee_rates": len(fee_rates_by_token),
         },
         "opportunities": [opportunity.to_dict() for opportunity in scored],
     }
@@ -117,10 +143,13 @@ def format_human(report: Dict[str, Any]) -> str:
         "Polyarb research scan",
         f"Generated: {report['generated_at']}",
         (
-            f"Sources: {report['source_counts']['events']} events, "
+            f"Sources: {report['source_counts']['events']} scanned events "
+            f"({report['source_counts'].get('events_fetched', report['source_counts']['events'])} fetched), "
             f"{report['source_counts']['markets']} markets, "
             f"{report['source_counts']['books']} books"
         ),
+        "Horizon: "
+        + ("all" if report["config"]["within_hours"] is None else f"{report['config']['within_hours']:.1f} hours"),
         f"Opportunities: {len(report['opportunities'])}",
     ]
     if not report["opportunities"]:
@@ -167,7 +196,8 @@ def format_execution(execution_by_size: Dict[str, Dict[str, Any]]) -> str:
     for size, estimate in execution_by_size.items():
         if estimate["executable"]:
             chunks.append(
-                f"${size}: cost ${estimate['cost']:.2f}, edge ${estimate['edge']:+.2f} ({estimate['edge_pct']:+.2%})"
+                f"${size}: net ${estimate['net_cost']:.2f} "
+                f"(fees ${estimate['fee_cost']:.2f}), edge ${estimate['edge']:+.2f} ({estimate['edge_pct']:+.2%})"
             )
         else:
             chunks.append(f"${size}: insufficient depth")

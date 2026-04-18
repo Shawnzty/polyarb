@@ -106,3 +106,80 @@ def test_correlated_threshold_down_detection(simple_books):
     assert opportunities[0].type == "correlated-threshold"
     assert opportunities[0].markets[0].title == "↓ 80,000"
     assert opportunities[0].markets[1].title == "↓ 70,000"
+
+
+def test_presidential_path_implication_removed(simple_books):
+    nominee = GammaEvent.from_gamma(
+        event_payload(
+            "nominee",
+            "Democratic Presidential Nominee 2028",
+            [market_payload("nominee-a", "Alice", 0.20, "easy-yes", "easy-no")],
+            neg_risk=True,
+        )
+    )
+    winner = GammaEvent.from_gamma(
+        event_payload(
+            "winner",
+            "Presidential Election Winner 2028",
+            [market_payload("winner-a", "Alice", 0.40, "hard-yes", "hard-no")],
+            neg_risk=True,
+        )
+    )
+
+    opportunities = CorrelatedScanner([100.0]).scan([nominee, winner], simple_books)
+
+    assert opportunities == []
+
+
+def test_range_bucket_temperature_markets_are_suppressed(simple_books):
+    event = GammaEvent.from_gamma(
+        event_payload(
+            "range-weather",
+            "Highest temperature in NYC on April 18?",
+            [
+                market_payload("easy", "60-61°F", 0.05, "easy-yes", "easy-no", extra={"question": "Will the highest temperature be between 60-61°F?", "negRisk": False}),
+                market_payload("hard", "62-63°F", 0.20, "hard-yes", "hard-no", extra={"question": "Will the highest temperature be between 62-63°F?", "negRisk": False}),
+            ],
+            neg_risk=False,
+        )
+    )
+
+    opportunities = CorrelatedScanner([100.0]).scan([event], simple_books)
+
+    assert opportunities == []
+
+
+def test_same_deadline_categorical_markets_are_not_time_links(simple_books):
+    event = GammaEvent.from_gamma(
+        event_payload(
+            "countries",
+            "Which countries will send warships by April 30?",
+            [
+                market_payload("fr", "France", 0.20, "easy-yes", "easy-no", extra={"question": "Will France send warships by April 30, 2026?", "negRisk": False}),
+                market_payload("uk", "United Kingdom", 0.40, "hard-yes", "hard-no", extra={"question": "Will the United Kingdom send warships by April 30, 2026?", "negRisk": False}),
+            ],
+            neg_risk=False,
+        )
+    )
+
+    opportunities = CorrelatedScanner([100.0]).scan([event], simple_books)
+
+    assert opportunities == []
+
+
+def test_resolution_source_mismatch_suppresses_correlated_link(simple_books):
+    event = GammaEvent.from_gamma(
+        event_payload(
+            "source-mismatch",
+            "Bitcoin above ___ on December 31?",
+            [
+                market_payload("easy", "↑ 80,000", 0.50, "easy-yes", "easy-no", extra={"question": "Will Bitcoin reach $80,000 by December 31, 2026?", "resolutionSource": "coinbase", "negRisk": False}),
+                market_payload("hard", "↑ 90,000", 0.55, "hard-yes", "hard-no", extra={"question": "Will Bitcoin reach $90,000 by December 31, 2026?", "resolutionSource": "binance", "negRisk": False}),
+            ],
+            neg_risk=False,
+        )
+    )
+
+    opportunities = CorrelatedScanner([100.0]).scan([event], simple_books)
+
+    assert opportunities == []
