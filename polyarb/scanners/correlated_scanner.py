@@ -1,33 +1,72 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from polyarb.models.event import GammaEvent
 from polyarb.models.market import GammaMarket
-from polyarb.models.opportunity import Opportunity, OpportunityMarket
+from polyarb.models.opportunity import ExecutionEstimate, Opportunity, OpportunityMarket
 from polyarb.models.orderbook import OrderBook
 from polyarb.scanners.execution import book_spread_warning, estimate_basket_cost
 
 
 MIN_CONFIDENCE = 0.85
 MIN_VIOLATION = 0.01
-MONTHS = {
-    "january": 1,
-    "february": 2,
-    "march": 3,
-    "april": 4,
-    "may": 5,
-    "june": 6,
-    "july": 7,
-    "august": 8,
-    "september": 9,
-    "october": 10,
-    "november": 11,
-    "december": 12,
-}
+MONTHS_FULL = [
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+]
+MONTH_ABBR = [m[:3] for m in MONTHS_FULL]
+MONTHS = {name: i + 1 for i, name in enumerate(MONTHS_FULL)}
+MONTHS.update({abbr: i + 1 for i, abbr in enumerate(MONTH_ABBR)})
+
+# Phrases that indicate a range bucket (e.g., "between $90k and $100k"). These
+# must be excluded from simple threshold comparisons. Keep the list tight —
+# bare "to $X" phrases like "dip to $80,000" are threshold statements, not
+# range buckets, and must not appear here.
+RANGE_PHRASES = (
+    "between", "range", "o/u", "over/under", "total corners", "band",
+)
+# "from X to Y" range phrases (with optional currency markers on both numbers).
+RANGE_FROM_TO_PATTERN = re.compile(
+    r"\bfrom\s*[$£€]?\s*\d+(?:\.\d+)?\s*[kmb]?\s+(?:to|through|thru|and)\s*[$£€]?\s*\d+(?:\.\d+)?\s*[kmb]?\b",
+    re.I,
+)
+# Match any two numbers separated by an ASCII or Unicode dash, with optional k/m/b suffixes.
+RANGE_DASH_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*[kmb]?\s*[-–—−]\s*\d+(?:\.\d+)?\s*[kmb]?\b", re.I
+)
+# Match a directional verb immediately followed by a currency/number, e.g. "above $80,000".
+DIRECTIONAL_THRESHOLD_PATTERN = re.compile(
+    r"(above|below|over|under|reach(?:es|ed)?|hit(?:s|ting)?|clears?|tops?|at least|at most|≥|>=|≤|<=|>|<)"
+    r"\s*[$£€]?\s*(\d+(?:\.\d+)?)\s*([kmb]?)",
+    re.I,
+)
+# Fallback: any number with optional currency and k/m/b suffix.
+NUMERIC_PATTERN = re.compile(r"[$£€]?\s*(\d+(?:\.\d+)?)\s*([kmb]?)", re.I)
+# Full month or 3-letter abbreviation followed by a day (and optional year).
+MONTH_DAY_PATTERN = re.compile(
+    r"\b(" + "|".join(MONTHS_FULL + MONTH_ABBR) + r")\s+(\d{1,2})(?:,\s*(\d{4}))?",
+    re.I,
+)
+# ISO-style YYYY-MM-DD.
+ISO_DATE_PATTERN = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
+# MM/DD[/YYYY] — ambiguous without locale, treated as US-style.
+US_DATE_PATTERN = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
+
+
+def _apply_magnitude_suffix(value: float, suffix: str) -> float:
+    lowered = (suffix or "").lower()
+    if lowered == "k":
+        return value * 1_000
+    if lowered == "m":
+        return value * 1_000_000
+    if lowered == "b":
+        return value * 1_000_000_000
+    return value
 
 
 @dataclass(frozen=True)
@@ -45,9 +84,13 @@ class CorrelatedScanner:
         self,
         target_sizes: Iterable[float],
         fee_rates_by_token: Dict[str, float] = None,
+        max_book_age_s: Optional[float] = None,
+        now: Optional[float] = None,
     ) -> None:
         self.target_sizes = list(target_sizes)
         self.fee_rates_by_token = fee_rates_by_token or {}
+        self.max_book_age_s = max_book_age_s
+        self._now = now
 
     def scan(
         self,
@@ -59,12 +102,38 @@ class CorrelatedScanner:
         for event in event_list:
             implications.extend(self._time_implications(event))
             implications.extend(self._threshold_implications(event))
-        return [
-            self._to_opportunity(implication, books_by_token)
-            for implication in implications
-            if implication.confidence >= MIN_CONFIDENCE
-            and self._violation(implication.easier, implication.harder) >= MIN_VIOLATION
-        ]
+        opportunities: List[Opportunity] = []
+        for implication in implications:
+            if implication.confidence < MIN_CONFIDENCE:
+                continue
+            package = estimate_basket_cost(
+                [
+                    (implication.easier, implication.easier.yes_token_id, "Yes"),
+                    (implication.harder, implication.harder.no_token_id, "No"),
+                ],
+                books_by_token,
+                1.0,
+                self.fee_rates_by_token,
+                enforce_min_order=False,
+            )
+            # CLOB-first gating: require the real post-fee package cost to prove
+            # the violation. Gamma `yes_price` is never trusted as the gate.
+            if not package.executable or package.net_cost is None:
+                continue
+            if package.net_cost > 1.0 - MIN_VIOLATION:
+                continue
+            if self._is_stale(package.min_book_timestamp):
+                continue
+            opportunities.append(self._to_opportunity(implication, books_by_token, package))
+        return opportunities
+
+    def _is_stale(self, min_book_timestamp: Optional[float]) -> bool:
+        if self.max_book_age_s is None:
+            return False
+        if min_book_timestamp is None:
+            return True
+        now = self._now if self._now is not None else time.time()
+        return (now - min_book_timestamp) > self.max_book_age_s
 
     def _time_implications(self, event: GammaEvent) -> List[Implication]:
         title = event.title.lower()
@@ -138,22 +207,11 @@ class CorrelatedScanner:
         self,
         implication: Implication,
         books_by_token: Dict[str, OrderBook],
+        one_share_package: ExecutionEstimate,
     ) -> Opportunity:
         easy_yes = implication.easier.yes_price or 0.0
         hard_yes = implication.harder.yes_price or 0.0
-        hard_no = implication.harder.no_price
-        if hard_no is None:
-            hard_no = max(0.0, 1.0 - hard_yes)
-        one_share_package = estimate_basket_cost(
-            [
-                (implication.easier, implication.easier.yes_token_id, "Yes"),
-                (implication.harder, implication.harder.no_token_id, "No"),
-            ],
-            books_by_token,
-            1.0,
-            self.fee_rates_by_token,
-        )
-        package_cost = one_share_package.net_cost if one_share_package.executable and one_share_package.net_cost is not None else easy_yes + hard_no
+        package_cost = one_share_package.net_cost
         edge = 1.0 - package_cost
         violation = hard_yes - easy_yes
         warnings = self._warnings(implication, books_by_token)
@@ -191,7 +249,7 @@ class CorrelatedScanner:
                 "package_cost": package_cost,
                 "edge": edge,
                 "kind": "implication-package",
-                "price_source": "clob_best_ask_post_fee" if one_share_package.executable else "gamma_price_fallback",
+                "price_source": "clob_best_ask_post_fee",
                 "fee_cost_for_one_share_package": one_share_package.fee_cost,
             },
             execution_by_size=execution,
@@ -263,9 +321,11 @@ class CorrelatedScanner:
 
     def _is_range_bucket(self, market: GammaMarket) -> bool:
         text = f"{market.group_item_title} {market.question}".lower()
-        if any(term in text for term in ["between", "range", "o/u", "over/under", "total corners"]):
+        if any(term in text for term in RANGE_PHRASES):
             return True
-        return bool(re.search(r"\b\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?\b", text))
+        if RANGE_FROM_TO_PATTERN.search(text):
+            return True
+        return bool(RANGE_DASH_PATTERN.search(text))
 
     def _rules_match(
         self,
@@ -288,37 +348,71 @@ class CorrelatedScanner:
 
     def _parse_threshold(self, text: str) -> Optional[float]:
         normalized = text.replace(",", "")
-        matches = re.findall(r"[$£€]?\s*(\d+(?:\.\d+)?)\s*([kKmMbB]?)", normalized)
-        values = []
-        for number, suffix in matches:
-            value = float(number)
-            if suffix.lower() == "k":
-                value *= 1_000
-            elif suffix.lower() == "m":
-                value *= 1_000_000
-            elif suffix.lower() == "b":
-                value *= 1_000_000_000
-            values.append(value)
-        return max(values) if values else None
+        # Prefer a directional verb right before a number: `above $80,000`, `reaches $100k`.
+        directional = DIRECTIONAL_THRESHOLD_PATTERN.search(normalized)
+        if directional:
+            return _apply_magnitude_suffix(float(directional.group(2)), directional.group(3))
+        # Fallback: if the text contains exactly one numeric match, use it.
+        numeric_matches = NUMERIC_PATTERN.findall(normalized)
+        if len(numeric_matches) == 1:
+            number, suffix = numeric_matches[0]
+            return _apply_magnitude_suffix(float(number), suffix)
+        return None
 
     def _parse_date(self, label: str, question: str, event_end_date: str) -> Optional[datetime]:
         text = f"{label} {question}"
-        pattern = re.compile(
-            r"\b("
-            + "|".join(MONTHS.keys())
-            + r")\s+(\d{1,2})(?:,\s*(\d{4}))?",
-            re.I,
-        )
-        match = pattern.search(text)
+        for parser in (self._parse_iso_date, self._parse_month_day, self._parse_us_date):
+            result = parser(text, question, event_end_date)
+            if result is not None:
+                return result
+        return None
+
+    def _parse_iso_date(self, text: str, question: str, event_end_date: str) -> Optional[datetime]:
+        match = ISO_DATE_PATTERN.search(text)
         if not match:
             return None
-        month = MONTHS[match.group(1).lower()]
+        try:
+            return datetime(
+                int(match.group(1)), int(match.group(2)), int(match.group(3)), tzinfo=timezone.utc
+            )
+        except ValueError:
+            return None
+
+    def _parse_month_day(self, text: str, question: str, event_end_date: str) -> Optional[datetime]:
+        match = MONTH_DAY_PATTERN.search(text)
+        if not match:
+            return None
+        month = MONTHS.get(match.group(1).lower())
+        if month is None:
+            return None
         day = int(match.group(2))
         year = int(match.group(3)) if match.group(3) else self._infer_year(question, event_end_date)
         if not year:
             return None
         try:
-            return datetime(year, month, day)
+            return datetime(year, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    def _parse_us_date(self, text: str, question: str, event_end_date: str) -> Optional[datetime]:
+        match = US_DATE_PATTERN.search(text)
+        if not match:
+            return None
+        month = int(match.group(1))
+        day = int(match.group(2))
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+        raw_year = match.group(3)
+        if raw_year:
+            year = int(raw_year)
+            if year < 100:
+                year += 2000
+        else:
+            year = self._infer_year(question, event_end_date)
+        if not year:
+            return None
+        try:
+            return datetime(year, month, day, tzinfo=timezone.utc)
         except ValueError:
             return None
 

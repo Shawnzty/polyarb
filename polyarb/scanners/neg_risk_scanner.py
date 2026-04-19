@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Dict, Iterable, List, Optional
 
 from polyarb.models.event import GammaEvent
@@ -18,9 +19,15 @@ class NegRiskScanner:
         self,
         target_sizes: Iterable[float],
         fee_rates_by_token: Dict[str, float] = None,
+        max_book_age_s: Optional[float] = None,
+        now: Optional[float] = None,
     ) -> None:
         self.target_sizes = list(target_sizes)
         self.fee_rates_by_token = fee_rates_by_token or {}
+        # `max_book_age_s=None` disables the gate (default for legacy callers);
+        # the CLI wires a config-driven value. `now` is injectable for tests.
+        self.max_book_age_s = max_book_age_s
+        self._now = now
 
     def scan(
         self,
@@ -28,8 +35,13 @@ class NegRiskScanner:
         books_by_token: Dict[str, OrderBook],
     ) -> List[Opportunity]:
         opportunities: List[Opportunity] = []
+        self.blocked_events: List[Dict[str, str]] = []
         for event in events:
             if not event.active or event.closed or not event.neg_risk:
+                continue
+            mece_block = self._mece_block_reason(event)
+            if mece_block is not None:
+                self.blocked_events.append({"event_id": event.id, "reason": mece_block})
                 continue
             markets = self._active_markets(event)
             if len(markets) < 2:
@@ -40,7 +52,11 @@ class NegRiskScanner:
                 books_by_token,
                 1.0,
                 self.fee_rates_by_token,
+                enforce_min_order=False,
             )
+            if self._is_stale(one_share_ask.min_book_timestamp):
+                self.blocked_events.append({"event_id": event.id, "reason": "stale-book"})
+                continue
             sum_best_bid = self._sum_best_bids(markets, books_by_token)
             residual = None
 
@@ -124,6 +140,15 @@ class NegRiskScanner:
             total += book.best_bid
         return total
 
+    def _is_stale(self, min_book_timestamp: Optional[float]) -> bool:
+        if self.max_book_age_s is None:
+            return False
+        if min_book_timestamp is None:
+            # Unknown age: be conservative and treat as stale when the gate is active.
+            return True
+        now = self._now if self._now is not None else time.time()
+        return (now - min_book_timestamp) > self.max_book_age_s
+
     def _active_markets(self, event: GammaEvent) -> List[GammaMarket]:
         markets = []
         for market in event.markets:
@@ -132,6 +157,21 @@ class NegRiskScanner:
             markets.append(market)
         return markets
 
+    def _mece_block_reason(self, event: GammaEvent) -> Optional[str]:
+        # The basket-arb claim (sum YES < 1 => buy all YES for $1 guaranteed) only
+        # holds when the basket is mutually exclusive and collectively exhaustive.
+        # Promote these signals from warnings to hard blocks:
+        #   - Augmented neg-risk events can add new outcomes mid-trade.
+        #   - An inactive/closed child while the event is still open means the
+        #     scanner would sum over a non-exhaustive set (the dropped child can
+        #     still resolve YES and zero every other leg).
+        if event.neg_risk_augmented:
+            return "augmented-neg-risk"
+        for market in event.markets:
+            if not market.active or market.closed:
+                return "inactive-child-market"
+        return None
+
     def _warnings(
         self,
         event: GammaEvent,
@@ -139,8 +179,8 @@ class NegRiskScanner:
         books_by_token: Dict[str, OrderBook],
     ) -> List[str]:
         warnings: List[str] = []
-        if event.neg_risk_augmented or event.enable_neg_risk:
-            warnings.append("augmented-neg-risk")
+        # `augmented-neg-risk` is now a hard block (see _mece_block_reason),
+        # so it no longer appears as a warning on emitted opportunities.
         for market in markets:
             title = market.display_title.lower()
             question = market.question.lower()

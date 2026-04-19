@@ -57,6 +57,7 @@ def test_config_loading_and_cli_override_precedence(tmp_path, simple_books):
         "max_results": 25,
         "neg_risk_only": False,
         "correlated_only": False,
+        "rank_by": "apy",
     }
 
     report = run_scan(

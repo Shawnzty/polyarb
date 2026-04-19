@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Dict, Iterable, List
 
 import pytest
@@ -53,6 +54,7 @@ def event_payload(
     title: str,
     markets: List[dict],
     neg_risk: bool = True,
+    neg_risk_augmented: bool = False,
     extra: dict = None,
 ) -> dict:
     payload = {
@@ -64,7 +66,7 @@ def event_payload(
         "active": True,
         "closed": False,
         "negRisk": neg_risk,
-        "negRiskAugmented": neg_risk,
+        "negRiskAugmented": neg_risk_augmented,
         "enableNegRisk": neg_risk,
         "showAllOutcomes": True,
         "volume": 100000.0,
@@ -78,12 +80,17 @@ def event_payload(
     return payload
 
 
-def book_payload(token_id: str, asks: list, bids: list = None) -> dict:
+def book_payload(token_id: str, asks: list, bids: list = None, timestamp: str = None) -> dict:
     bids = bids or [{"price": "0.20", "size": "1000"}]
+    # Default to now so the staleness gate (max_book_age_s) does not silently
+    # drop every fixture. Tests that want to exercise staleness explicitly
+    # pass an older timestamp.
+    if timestamp is None:
+        timestamp = str(int(time.time() * 1000))
     return {
         "market": f"market-{token_id}",
         "asset_id": token_id,
-        "timestamp": "1",
+        "timestamp": timestamp,
         "bids": bids,
         "asks": asks,
     }

@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from polyarb.models.parsing import as_float, clean_text
+
+
+_ZERO = Decimal("0")
+_ONE = Decimal("1")
+_FILL_EPS = Decimal("1e-9")
+
+
+def _d(value: float) -> Decimal:
+    # Decimal(str(float)) rounds to the float's short-repr, which is what the
+    # CLOB itself prints: 4dp prices, 2dp sizes. This avoids float-binary
+    # residue (0.1 + 0.2 ≠ 0.3) that would otherwise leave shelf-boundary
+    # fills at 1e-17 and trip the "remaining <= eps" check.
+    return Decimal(str(value))
 
 
 @dataclass(frozen=True)
@@ -69,29 +83,53 @@ class OrderBook:
             return None
         return max(0.0, self.best_ask - self.best_bid)
 
+    @property
+    def total_ask_size(self) -> float:
+        return float(sum(_d(level.size) for level in self.asks))
+
+    @property
+    def timestamp_seconds(self) -> Optional[float]:
+        # The Polymarket CLOB `timestamp` field on book payloads is a string
+        # in milliseconds since epoch. Return it as a Unix-seconds float so
+        # callers can compare with `time.time()`/`datetime` trivially. Returns
+        # None on missing/unparseable values — callers treat that as
+        # "unknown age" rather than "fresh".
+        if not self.timestamp:
+            return None
+        try:
+            millis = int(self.timestamp)
+        except (TypeError, ValueError):
+            return None
+        return millis / 1000.0
+
     def buy_shares(self, shares: float, fee_rate: float = 0.0) -> FillEstimate:
-        remaining = max(0.0, shares)
-        filled = 0.0
-        gross_cost = 0.0
-        fee_cost = 0.0
+        remaining = _d(max(0.0, shares))
+        filled = _ZERO
+        gross_cost = _ZERO
+        fee_cost = _ZERO
+        rate = _d(max(0.0, fee_rate))
         for level in self.asks:
-            if remaining <= 1e-12:
+            if remaining <= _ZERO:
                 break
-            take = min(remaining, level.size)
-            gross_cost += take * level.price
-            fee_cost += take * max(0.0, fee_rate) * level.price * (1.0 - level.price)
+            price = _d(level.price)
+            size = _d(level.size)
+            take = remaining if remaining < size else size
+            gross_cost += take * price
+            # Polymarket CLOB fee: fee = C * feeRate * p * (1 - p).
+            # https://docs.polymarket.com/trading/fees
+            fee_cost += take * rate * price * (_ONE - price)
             filled += take
             remaining -= take
 
-        executable = remaining <= 1e-9
+        executable = remaining <= _FILL_EPS
         cost = gross_cost + fee_cost
-        avg_price = gross_cost / filled if filled > 0 else None
+        avg_price = float(gross_cost / filled) if filled > _ZERO else None
         return FillEstimate(
             requested_shares=shares,
-            filled_shares=filled,
-            cost=cost,
+            filled_shares=float(filled),
+            cost=float(cost),
             avg_price=avg_price,
             executable=executable,
-            gross_cost=gross_cost,
-            fee_cost=fee_cost,
+            gross_cost=float(gross_cost),
+            fee_cost=float(fee_cost),
         )

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from polyarb.cli import build_parser; build_parser\\(\\).parse_args\\(['check-deps']\\)\")",
+      "Bash(python -m pytest tests/test_preflight.py -v)",
+      "Bash(python -m pytest tests/)",
+      "Bash(python -c ' *)",
+      "Bash(echo \"---exit code: $?---\")",
+      "Bash(python -m polyarb.cli check-deps)",
+      "Bash(echo \"---exit: $?---\")"
+    ]
+  }
+}

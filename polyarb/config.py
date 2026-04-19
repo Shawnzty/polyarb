@@ -10,6 +10,9 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     "scan": {
         "within_hours": 24.0,
         "target_sizes": [100.0, 500.0, 1000.0],
+        # None disables the staleness gate; 60.0 is a safe REST-pipeline default.
+        # Set lower (e.g. 2.0) for a WS-driven daemon once it exists.
+        "max_book_age_s": 60.0,
     },
     "risk": {
         "leg_risk_bps_per_extra_leg": 25.0,

@@ -50,6 +50,18 @@ class ExecutionEstimate:
     leg_count: int = 0
     missing_legs: List[str] = field(default_factory=list)
     note: str = ""
+    # Shrink-to-min-depth accounting. The basket is not atomic on-chain; if we
+    # size above the shallowest leg, a partial fill leaves a naked directional
+    # position. `max_executable_size` is the per-leg floor: min of available
+    # ask-side depth across legs, capped at `target_size`. `atomic_risk` is
+    # True when `target_size` exceeds that floor.
+    max_executable_size: float = 0.0
+    atomic_risk: bool = False
+    below_min_order: bool = False
+    # Oldest leg book timestamp (Unix seconds) that fed this estimate. Used by
+    # the staleness gate: REST snapshots accumulate age during long pipelines,
+    # and a 40s-old ask stack on a BTC market has already reprint-cycled.
+    min_book_timestamp: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -65,6 +77,10 @@ class ExecutionEstimate:
             "leg_count": self.leg_count,
             "missing_legs": self.missing_legs,
             "note": self.note,
+            "max_executable_size": self.max_executable_size,
+            "atomic_risk": self.atomic_risk,
+            "below_min_order": self.below_min_order,
+            "min_book_timestamp": self.min_book_timestamp,
         }
 
 
@@ -82,6 +98,14 @@ class Opportunity:
     explanation: str
     score: float = 0.0
     rank: Optional[int] = None
+    # Time-weighted scoring metrics populated by `score_opportunities`.
+    # `capital_at_risk` / `edge_pct` are per-$ quantities on the best
+    # executable size; `apy` is the linearised annualised return. These are
+    # None when the opportunity has no executable estimate.
+    capital_at_risk: Optional[float] = None
+    edge_pct: Optional[float] = None
+    time_to_res_h: Optional[float] = None
+    apy: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -98,4 +122,8 @@ class Opportunity:
             "liquidity": self.liquidity,
             "warnings": self.warnings,
             "explanation": self.explanation,
+            "capital_at_risk": self.capital_at_risk,
+            "edge_pct": self.edge_pct,
+            "time_to_res_h": self.time_to_res_h,
+            "apy": self.apy,
         }

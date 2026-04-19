@@ -1,6 +1,7 @@
 from polyarb.models.event import GammaEvent
+from polyarb.models.orderbook import OrderBook
 from polyarb.scanners.correlated_scanner import CorrelatedScanner
-from tests.conftest import event_payload, market_payload
+from tests.conftest import book_payload, event_payload, market_payload
 
 
 def test_correlated_time_monotonicity_detection(simple_books):
@@ -165,6 +166,59 @@ def test_same_deadline_categorical_markets_are_not_time_links(simple_books):
     opportunities = CorrelatedScanner([100.0]).scan([event], simple_books)
 
     assert opportunities == []
+
+
+def test_correlated_gamma_violation_but_clob_package_does_not_pay(simple_books):
+    # Gamma reports harder=0.55 > easier=0.50 (violation), but CLOB asks make
+    # the (easier YES + harder NO) package cost > $1 after fees. CLOB-first
+    # gating must reject.
+    event = GammaEvent.from_gamma(
+        event_payload(
+            "gamma-only-violation",
+            "Bitcoin above ___ on December 31?",
+            [
+                market_payload("easy", "↑ 80,000", 0.50, "ez-yes", "ez-no", extra={"question": "Will Bitcoin reach $80,000 by December 31, 2026?", "negRisk": False}),
+                market_payload("hard", "↑ 90,000", 0.55, "hd-yes", "hd-no", extra={"question": "Will Bitcoin reach $90,000 by December 31, 2026?", "negRisk": False}),
+            ],
+            neg_risk=False,
+        )
+    )
+    # CLOB: easier YES ask = 0.58, harder NO ask = 0.52 → package = 1.10, no arb.
+    books = {
+        "ez-yes": OrderBook.from_clob(book_payload("ez-yes", asks=[{"price": "0.58", "size": "1000"}], bids=[{"price": "0.57", "size": "1000"}])),
+        "hd-no":  OrderBook.from_clob(book_payload("hd-no",  asks=[{"price": "0.52", "size": "1000"}], bids=[{"price": "0.51", "size": "1000"}])),
+    }
+
+    opportunities = CorrelatedScanner([100.0]).scan([event], books)
+
+    assert opportunities == []
+
+
+def test_correlated_gamma_no_violation_but_clob_package_pays(simple_books):
+    # Gamma reports harder=0.49 < easier=0.50 (no apparent violation), but the
+    # CLOB (easier YES + harder NO) package costs < $1 after fees. CLOB-first
+    # gating must still emit the opportunity — Gamma is not the gate.
+    event = GammaEvent.from_gamma(
+        event_payload(
+            "clob-only-violation",
+            "Bitcoin above ___ on December 31?",
+            [
+                market_payload("easy", "↑ 80,000", 0.50, "ez-yes", "ez-no", extra={"question": "Will Bitcoin reach $80,000 by December 31, 2026?", "negRisk": False}),
+                market_payload("hard", "↑ 90,000", 0.49, "hd-yes", "hd-no", extra={"question": "Will Bitcoin reach $90,000 by December 31, 2026?", "negRisk": False}),
+            ],
+            neg_risk=False,
+        )
+    )
+    # CLOB: easier YES ask = 0.50, harder NO ask = 0.48 → package = 0.98, clean $0.02 edge.
+    books = {
+        "ez-yes": OrderBook.from_clob(book_payload("ez-yes", asks=[{"price": "0.50", "size": "1000"}], bids=[{"price": "0.49", "size": "1000"}])),
+        "hd-no":  OrderBook.from_clob(book_payload("hd-no",  asks=[{"price": "0.48", "size": "1000"}], bids=[{"price": "0.47", "size": "1000"}])),
+    }
+
+    opportunities = CorrelatedScanner([100.0]).scan([event], books)
+
+    assert len(opportunities) == 1
+    assert opportunities[0].theoretical["price_source"] == "clob_best_ask_post_fee"
 
 
 def test_resolution_source_mismatch_suppresses_correlated_link(simple_books):
